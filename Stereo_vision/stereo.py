@@ -112,8 +112,8 @@ def annotate_targets(frame, boxes, disparity):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 model = YOLO("Yolo_models/yolov8n.pt")
 
-left_buf  = CameraBuffer(0)
-right_buf = CameraBuffer(2)
+left_buf  = CameraBuffer(2)
+right_buf = CameraBuffer(4)
 
 # Create window once outside the loop
 cv2.namedWindow("target Detection + Depth", cv2.WINDOW_NORMAL)

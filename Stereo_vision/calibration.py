@@ -3,16 +3,50 @@ import numpy as np
 import pickle
 from pathlib import Path
 
+def load_existing_images():
+    global objpoints, imgpoints_l, imgpoints_r
+
+    left_imgs  = sorted(CALIB_DIR.glob("left_*.png"))
+    right_imgs = sorted(CALIB_DIR.glob("right_*.png"))
+
+    pairs = min(len(left_imgs), len(right_imgs))
+    print(f"Loading {pairs} existing calibration pairs...")
+
+    for i in range(pairs):
+
+        img_l = cv2.imread(str(left_imgs[i]))
+        img_r = cv2.imread(str(right_imgs[i]))
+
+        gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
+        gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
+
+        found_l, corners_l = cv2.findChessboardCorners(gray_l, CHESSBOARD, None)
+        found_r, corners_r = cv2.findChessboardCorners(gray_r, CHESSBOARD, None)
+
+        if found_l and found_r:
+
+            corners_l = cv2.cornerSubPix(gray_l, corners_l, (11,11), (-1,-1), criteria)
+            corners_r = cv2.cornerSubPix(gray_r, corners_r, (11,11), (-1,-1), criteria)
+
+            objpoints.append(objp)
+            imgpoints_l.append(corners_l)
+            imgpoints_r.append(corners_r)
+
+        else:
+            print(f"Warning: pair {i} checkerboard not detected")
+
+    print(f"Loaded {len(objpoints)} usable pairs\n")
 # ─── Checkerboard config ──────────────────────────────────────────────────────
 # These must match YOUR printed checkerboard
 # Count INNER corners, not squares. A 9x6 square board has 8x5 inner corners.
 CHESSBOARD = (7, 9)
-SQUARE_SIZE = 0.021  # meters — measure your printed square size precisely
+SQUARE_SIZE = 0.020  # meters — measure your printed square size precisely
 
-FRAME_W, FRAME_H = 210, 168
+FRAME_W, FRAME_H = 640, 480   # must match stereo.py exactly
 OUTPUT_FILE = "stereo_calib.pkl"
 CALIB_DIR   = Path("calib_images")
 CALIB_DIR.mkdir(exist_ok=True)
+
 
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
@@ -25,22 +59,20 @@ objpoints   = []   # 3D points in real world
 imgpoints_l = []   # 2D points in left image
 imgpoints_r = []   # 2D points in right image
 
+load_existing_images()
+captured = len(objpoints)
 # ─── Camera setup ─────────────────────────────────────────────────────────────
 def open_camera(index):
     cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # compressed, uses less USB bandwidth
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 15)  # drop to 15fps — halves bandwidth
-    return cap
-
-left_cap  = open_camera(0)
-right_cap = open_camera(2)
-
-for cap in (left_cap, right_cap):
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
-    cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_FPS, 15)
+    return cap
+    
+left_cap  = open_camera(2)
+right_cap = open_camera(4)
+# NOTE: open_camera() already sets 640x480 @ 15fps — no override needed
 
 print("=== Stereo Calibration ===")
 print(f"Target: 20+ image pairs with checkerboard visible in BOTH cameras")
@@ -53,7 +85,11 @@ print("  C      — run calibration (needs 20+ pairs)")
 print("  Q      — quit")
 print()
 
-captured = 0
+captured = len(objpoints)
+
+# Force window to appear before loop starts
+cv2.namedWindow("Stereo Calibration — Left | Right", cv2.WINDOW_NORMAL)
+cv2.waitKey(1)
 
 while True:
     ret_l, left_frame  = left_cap.read()
@@ -117,11 +153,12 @@ while True:
         print(f"  Deleted last capture. Total: {captured}")
 
     elif key == ord('c'):
-        if captured < 20:
-            print(f"  Need at least 20 pairs (have {captured}). Keep capturing.")
+        existing = len(objpoints)
+        if existing < 20:
+            print(f"  Need at least 20 pairs (found {existing} in {CALIB_DIR}). Keep capturing.")
             continue
 
-        print(f"\nRunning calibration on {captured} pairs...")
+        print(f"\nRunning calibration on {existing} pairs found in {CALIB_DIR}...")
 
         img_size = (FRAME_W, FRAME_H)
 
@@ -146,17 +183,18 @@ while True:
 
         # T[0] is the horizontal baseline in meters
         baseline_m = abs(float(T.flatten()[0]))
-        focal_px   = float(K_l[0, 0])   # fx from left camera matrix
 
         print(f"\n  ✓ Stereo RMS error : {ret_stereo:.4f}  (good if < 1.0)")
         print(f"  ✓ Baseline         : {baseline_m*100:.2f} cm")
-        print(f"  ✓ Focal length     : {focal_px:.1f} px")
 
         # ── Stereo rectification ───────────────────────────────────────────
         R_l, R_r, P_l, P_r, Q, roi_l, roi_r = cv2.stereoRectify(
             K_l, D_l, K_r, D_r, img_size, R, T,
             flags=cv2.CALIB_ZERO_DISPARITY, alpha=0
         )
+
+        focal_px   = float(P_l[0, 0])   # fx from RECTIFIED projection matrix (not raw K_l)
+        print(f"  ✓ Focal length     : {focal_px:.1f} px")
 
         map_lx, map_ly = cv2.initUndistortRectifyMap(K_l, D_l, R_l, P_l, img_size, cv2.CV_32FC1)
         map_rx, map_ry = cv2.initUndistortRectifyMap(K_r, D_r, R_r, P_r, img_size, cv2.CV_32FC1)
