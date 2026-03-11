@@ -14,7 +14,7 @@ map_lx, map_ly  = calib["map_lx"], calib["map_ly"]
 map_rx, map_ry  = calib["map_rx"], calib["map_ry"]
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-TARGET_CLASS        = 0
+TARGET_CLASS        = 39
 DETECT_EVERY        = 4
 DETECT_W, DETECT_H  = 320, 240
 FRAME_W,  FRAME_H   = 640, 480
@@ -52,10 +52,10 @@ class CameraBuffer:
 # ─── Depth Helpers ────────────────────────────────────────────────────────────
 stereo = cv2.StereoSGBM_create(
     minDisparity=0,
-    numDisparities=128,
-    blockSize=11,
-    P1=8 * 3 * 11 ** 2,
-    P2=32 * 3 * 11 ** 2,
+    numDisparities=256,   # covers down to ~23cm at your baseline
+    blockSize=7,          # smaller block helps near objects
+    P1=8 * 3 * 7 ** 2,
+    P2=32 * 3 * 7 ** 2,
     disp12MaxDiff=1,
     uniquenessRatio=10,
     speckleWindowSize=100,
@@ -81,7 +81,12 @@ def annotate_targets(frame, boxes, disparity):
             continue
 
         target_found = True
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        # Scale coordinates from detection res to full res
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        x1 = int(x1 * scale_x)
+        y1 = int(y1 * scale_y)
+        x2 = int(x2 * scale_x)
+        y2 = int(y2 * scale_y)
         conf = float(box.conf[0])
 
         cx = (x1 + x2) // 2
@@ -110,7 +115,7 @@ def annotate_targets(frame, boxes, disparity):
     return frame
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
-model = YOLO("Yolo_models/yolov8n.pt")
+model = YOLO("Yolo_models/yolo11n.pt")
 
 left_buf  = CameraBuffer(2)
 right_buf = CameraBuffer(4)
