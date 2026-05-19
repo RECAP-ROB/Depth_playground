@@ -25,6 +25,10 @@ import time
 import threading
 import urllib.request
 import numpy as np
+for env_var in ["GTK_PATH", "QT_IM_MODULE", "GIO_MODULE_DIR"]:
+    if env_var in os.environ:
+        del os.environ[env_var]
+
 import cv2
 import os
 

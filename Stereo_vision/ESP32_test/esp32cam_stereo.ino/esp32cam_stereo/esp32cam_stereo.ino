@@ -40,8 +40,8 @@
 //  USER CONFIGURATION — edit these values
 // ─────────────────────────────────────────────
 #define CAMERA_ID     0           // 0 = LEFT camera, 1 = RIGHT camera
-#define WIFI_SSID     "NAKUJA"
-#define WIFI_PASSWORD "987654321"
+#define WIFI_SSID     "pheroh"
+#define WIFI_PASSWORD "spriter0cks6767"
 
 // mDNS hostnames (no need to change these)
 //   LEFT  → http://stereo-left.local/stream
