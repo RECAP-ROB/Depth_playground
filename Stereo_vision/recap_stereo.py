@@ -28,12 +28,29 @@ map_lx, map_ly = calib["map_lx"], calib["map_ly"]
 map_rx, map_ry = calib["map_rx"], calib["map_ry"]
 
 # --- Constants ---
-TARGET_CLASS = 39  # bottle in COCO
+CLASS_NAMES = [
+    "Ngano", "Maize Flour", "Rice",
+    "Chapa Mandazi", "Chocolate", "Indomie",
+    "Blue Band", "Omo", "Pilau Masala",
+]
+
+# TARGET_CLASS = 39  # bottle in COCO
 DETECT_EVERY = 4
 FRAME_W, FRAME_H = 640, 480
-DETECT_W, DETECT_H = 640, 480  # must match model export size
-scale_x = FRAME_W / DETECT_W
-scale_y = FRAME_H / DETECT_H
+DETECT_W, DETECT_H = 640, 640  # must match model export size
+
+def letterbox(frame):
+    """Pad frame to square with grey bars; return padded image + offsets for box inversion."""
+    h, w = frame.shape[:2]
+    scale = min(DETECT_W / w, DETECT_H / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(frame, (new_w, new_h))
+    pad_x = (DETECT_W - new_w) // 2
+    pad_y = (DETECT_H - new_h) // 2
+    padded = cv2.copyMakeBorder(resized, pad_y, DETECT_H - new_h - pad_y,
+                                pad_x, DETECT_W - new_w - pad_x,
+                                cv2.BORDER_CONSTANT, value=(114, 114, 114))
+    return padded, scale, pad_x, pad_y
 
 # --- ESP32-CAM Stream Buffer ---
 class CameraBufferURL:
@@ -87,40 +104,41 @@ def get_3d_coordinates(u, v, disparity_val):
 CONF_THRESH = 0.4
 NMS_THRESH  = 0.4
 
-_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "Yolo_models", "yolo11n.onnx")
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "Yolo_models", "best.onnx")
 _session = ort.InferenceSession(_MODEL_PATH, providers=["CPUExecutionProvider"])
 _input_name = _session.get_inputs()[0].name
 
-def detect_bottles(frame):
-    """Run YOLO11n ONNX inference, return list of (x1,y1,x2,y2,conf) in frame coords."""
-    # Preprocess: resize, normalize, NCHW
-    img = cv2.resize(frame, (DETECT_W, DETECT_H))
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+def detect_objects(frame):
+    """Run YOLO11n ONNX inference, return list of (x1,y1,x2,y2,conf,label) in frame coords."""
+    padded, scale, pad_x, pad_y = letterbox(frame)
+    img = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     blob = np.transpose(img, (2, 0, 1))[np.newaxis]  # (1,3,H,W)
 
-    out = _session.run(None, {_input_name: blob})[0][0]  # (84, 6300)
-    out = out.T  # -> (6300, 84)
+    out = _session.run(None, {_input_name: blob})[0][0]  # (num_classes+4, anchors)
+    out = out.T  # -> (anchors, num_classes+4)
 
-    boxes, scores = [], []
+    boxes, scores, class_ids = [], [], []
     for row in out:
         class_scores = row[4:]
         cls = int(np.argmax(class_scores))
         conf = float(class_scores[cls])
-        if cls != TARGET_CLASS or conf < CONF_THRESH:
+        if cls >= len(CLASS_NAMES) or conf < CONF_THRESH:
             continue
         cx, cy, bw, bh = row[:4]
-        x1 = int((cx - bw / 2) * scale_x)
-        y1 = int((cy - bh / 2) * scale_y)
-        x2 = int((cx + bw / 2) * scale_x)
-        y2 = int((cy + bh / 2) * scale_y)
+        # Remove letterbox padding then undo scale to get frame-space coords
+        x1 = int((cx - bw / 2 - pad_x) / scale)
+        y1 = int((cy - bh / 2 - pad_y) / scale)
+        x2 = int((cx + bw / 2 - pad_x) / scale)
+        y2 = int((cy + bh / 2 - pad_y) / scale)
         boxes.append([x1, y1, x2 - x1, y2 - y1])
         scores.append(conf)
+        class_ids.append(cls)
 
     kept = cv2.dnn.NMSBoxes(boxes, scores, CONF_THRESH, NMS_THRESH)
     results = []
     for i in (kept.flatten() if len(kept) else []):
         x, y, bw, bh = boxes[i]
-        results.append((x, y, x + bw, y + bh, scores[i]))
+        results.append((x, y, x + bw, y + bh, scores[i], CLASS_NAMES[class_ids[i]]))
     return results
 
 # --- Processing Logic ---
@@ -130,37 +148,40 @@ _Z_MAX   = 5.0    # metres — discard implausibly far readings
 
 def process_frame(frame, detections, disparity):
     coords_3d = None
-    for (x1, y1, x2, y2, conf) in detections:
+    for (x1, y1, x2, y2, conf, label) in detections:
         u = (x1 + x2) // 2
         v = (y1 + y2) // 2
 
-        # Larger patch → more valid disparity samples → more stable median
         patch = disparity[max(0, v - _PATCH_R):v + _PATCH_R,
                           max(0, u - _PATCH_R):u + _PATCH_R]
         valid = patch[patch > 0]
         if valid.size == 0:
             color = (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             continue
 
         raw = get_3d_coordinates(u, v, np.median(valid))
         if raw is None:
             color = (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             continue
 
         X_raw, Y_raw, Z_raw = raw
 
-        # Reject readings outside plausible range before smoothing
         if _Z_MIN < Z_raw < _Z_MAX:
             _z_history.append(Z_raw)
 
         if not _z_history:
             color = (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             continue
 
-        # Use smoothed Z but keep X/Y from current frame (they're less noisy)
         Z_smooth = float(np.median(_z_history))
         X = round((u - CX) * Z_smooth / FOCAL_LENGTH, 3)
         Y = round((v - CY) * Z_smooth / FOCAL_LENGTH, 3)
@@ -169,8 +190,8 @@ def process_frame(frame, detections, disparity):
         color = (0, 255, 0)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         X, Y, Z = coords_3d
-        print(f"Bottle -> X:{X:+.3f}m  Y:{Y:+.3f}m  Z:{Z:.3f}m")
-        for i, text in enumerate([f"X:{X:+.3f}m", f"Y:{Y:+.3f}m", f"Z:{Z:.3f}m"]):
+        print(f"{label} -> X:{X:+.3f}m  Y:{Y:+.3f}m  Z:{Z:.3f}m")
+        for i, text in enumerate([label, f"X:{X:+.3f}m", f"Y:{Y:+.3f}m", f"Z:{Z:.3f}m"]):
             cv2.putText(frame, text, (x1, y1 - 10 - i*18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
@@ -180,7 +201,7 @@ def process_frame(frame, detections, disparity):
 left_buf  = CameraBufferURL("http://stereo-left.local:80/stream")
 right_buf = CameraBufferURL("http://stereo-right.local:80/stream")
 
-cv2.namedWindow("Stereo Vision — Bottle Detection", cv2.WINDOW_NORMAL)
+cv2.namedWindow("Stereo Vision — Object Detection", cv2.WINDOW_NORMAL)
 
 while True:
     l_img = left_buf.read()
@@ -194,7 +215,7 @@ while True:
         for i, msg in enumerate(status):
             cv2.putText(blank, msg, (20, 40 + i*30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-        cv2.imshow("Stereo Vision — Bottle Detection", blank)
+        cv2.imshow("Stereo Vision — Object Detection", blank)
         if cv2.waitKey(100) & 0xFF == ord('q'): break
         continue
 
@@ -205,14 +226,14 @@ while True:
     gray_r = cv2.cvtColor(r_rect, cv2.COLOR_BGR2GRAY)
     disp = stereo.compute(gray_l, gray_r).astype(np.float32) / 16.0
 
-    detections = detect_bottles(l_rect)
+    detections = detect_objects(l_rect)
     annotated, current_pos = process_frame(l_rect.copy(), detections, disp)
 
     if current_pos:
         # arm.move_to(current_pos)
         pass
 
-    cv2.imshow("Stereo Vision — Bottle Detection", annotated)
+    cv2.imshow("Stereo Vision — Object Detection", annotated)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 left_buf.release()
